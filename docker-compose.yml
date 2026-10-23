@@ -1,0 +1,170 @@
+name: orderflow-cache
+
+x-app-env: &app-env
+  DEPLOYMENT_NAME: ${COMPOSE_PROJECT_NAME:-orderflow-cache}
+  DATABASE_URL: postgres://demo:demo@db:5432/orderflow
+  REDIS_1_URL: redis://redis1:6379/0
+  REDIS_2_URL: redis://redis2:6379/0
+  CACHE_MODE: ${CACHE_MODE:-aside}
+  CACHE_TTL_SEC: ${CACHE_TTL_SEC:-30}
+  L1_TTL_SEC: ${L1_TTL_SEC:-1}
+  DB_QUERY_EXTRA_MS: ${DB_QUERY_EXTRA_MS:-0}
+  DB_POOL_SIZE: ${DB_POOL_SIZE:-12}
+  CACHE_TIMEOUT_SEC: ${CACHE_TIMEOUT_SEC:-0.15}
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: orderflow
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+      SEED_ROWS: ${SEED_ROWS:-250000}
+    command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=256MB", "-c", "work_mem=8MB"]
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+      - ./db/init.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
+      - ./db/schema.sql:/db/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demo -d orderflow"]
+      interval: 4s
+      timeout: 3s
+      retries: 30
+    shm_size: 512mb
+    networks: [demo]
+
+  redis1:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 4s
+      retries: 20
+    networks: [demo]
+
+  redis2:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 4s
+      retries: 20
+    networks: [demo]
+
+  app:
+    build: .
+    environment: *app-env
+    cpus: ${APP_CPUS:-1.0}
+    mem_limit: ${APP_MEMORY:-512m}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 10s
+    networks: [demo]
+
+  gateway:
+    image: nginx:1.27-alpine
+    ports: ["127.0.0.1:${GATEWAY_PORT:-8080}:8080"]
+    volumes:
+      - ./infra/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on: [app]
+    networks: [demo]
+
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    ports: ["127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"]
+    volumes:
+      - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheusdata:/prometheus
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d", "--web.enable-lifecycle", "--web.enable-remote-write-receiver", "--enable-feature=native-histograms"]
+    depends_on: [app]
+    networks: [demo]
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    ports: ["127.0.0.1:${GRAFANA_PORT:-3000}:3000"]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus]
+    networks: [demo]
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.16.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://demo:demo@db:5432/orderflow?sslmode=disable
+    depends_on: [db]
+    networks: [demo]
+
+  redis1-exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    environment:
+      REDIS_ADDR: redis://redis1:6379
+    depends_on: [redis1]
+    networks: [demo]
+
+  redis2-exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    environment:
+      REDIS_ADDR: redis://redis2:6379
+    depends_on: [redis2]
+    networks: [demo]
+
+  k6:
+    image: grafana/k6:0.54.0
+    profiles: [tools]
+    volumes:
+      - ./benchmarks:/benchmarks:ro
+      - ./results:/results
+    user: "0:0"
+    networks: [demo]
+
+  pushgateway:
+    image: prom/pushgateway:v1.11.1
+    ports: ["127.0.0.1:${PUSHGATEWAY_PORT:-9091}:9091"]
+    networks: [demo]
+
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:1.4.1
+    command: ["--nginx.scrape-uri=http://gateway:8081/stub_status"]
+    depends_on: [gateway]
+    networks: [demo]
+
+  cadvisor:
+    image: ghcr.io/google/cadvisor:0.60.6
+    privileged: true
+    devices: ["/dev/kmsg:/dev/kmsg"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - ${DOCKER_DATA_ROOT:-/var/lib/docker}:/var/lib/docker:ro
+    command: ["--docker_only=true", "--housekeeping_interval=2s", "--max_housekeeping_interval=2s", "--store_container_labels=false", "--whitelisted_container_labels=com.docker.compose.project,com.docker.compose.service"]
+    networks: [demo]
+
+  node-exporter:
+    image: prom/node-exporter:v1.9.0
+    pid: host
+    volumes:
+      - /:/host:ro
+    command: ["--path.rootfs=/host"]
+    networks: [demo]
+
+networks:
+  demo:
+
+volumes:
+  dbdata:
+  grafanadata:
+  prometheusdata:

@@ -1,0 +1,64 @@
+groups:
+  - name: orderflow-golden-signals
+    interval: 5s
+    rules:
+      - record: orderflow:read_p95_seconds
+        expr: histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{route="/products/:id/snapshot",outcome="success"}[30s])))
+      - record: orderflow:read_p99_seconds
+        expr: histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{route="/products/:id/snapshot",outcome="success"}[30s])))
+      - record: orderflow:unexpected_error_ratio
+        expr: sum(rate(http_outcomes_total{operation=~"snapshot|activity|orders|revision|order_lookup",outcome=~"client_error|server_error"}[30s])) / sum(rate(http_outcomes_total{operation=~"snapshot|activity|orders|revision|order_lookup"}[30s]))
+      - record: orderflow:drop_ratio
+        expr: orderflow:dropped_rps / (sum(rate(k6_iterations_total[30s])) + orderflow:dropped_rps)
+      - record: orderflow:dropped_rps
+        expr: sum(rate(k6_dropped_iterations_total[30s])) or (0 * sum(rate(k6_iterations_total[30s])))
+      - alert: OrderFlowNormalLatencySLO
+        expr: (orderflow:read_p95_seconds > on() orderflow_slo_p95_seconds{contract="normal"}) and on() (min_over_time(orderflow_campaign_phase{phase="measurement"}[30s]) == 1) and on() (time() - orderflow_campaign_heartbeat_seconds < 15)
+        for: 10s
+        labels: {severity: warning, hypothesis: H1}
+        annotations: {summary: "Normal-phase read p95 exceeds the configured SLO"}
+      - alert: OrderFlowNormalP99LatencySLO
+        expr: (orderflow:read_p99_seconds > on() orderflow_slo_p99_seconds{contract="normal"}) and on() (min_over_time(orderflow_campaign_phase{phase="measurement"}[30s]) == 1) and on() (time() - orderflow_campaign_heartbeat_seconds < 15)
+        for: 10s
+        labels: {severity: warning, hypothesis: H1}
+        annotations: {summary: "Normal-phase read p99 exceeds the configured SLO"}
+      - alert: OrderFlowDegradedLatencySLO
+        expr: (orderflow:read_p95_seconds > on() orderflow_slo_p95_seconds{contract="degraded"}) and on() (sum(orderflow_campaign_phase{phase=~"fault|recovery"}) == 1) and on() (time() - orderflow_campaign_heartbeat_seconds < 15)
+        for: 10s
+        labels: {severity: warning, hypothesis: H5}
+        annotations: {summary: "Degraded-phase read p95 exceeds the configured SLO (30s window may straddle phase boundary)"}
+      - alert: OrderFlowDegradedP99LatencySLO
+        expr: (orderflow:read_p99_seconds > on() orderflow_slo_p99_seconds{contract="degraded"}) and on() (sum(orderflow_campaign_phase{phase=~"fault|recovery"}) == 1) and on() (time() - orderflow_campaign_heartbeat_seconds < 15)
+        for: 10s
+        labels: {severity: warning, hypothesis: H5}
+        annotations: {summary: "Degraded-phase read p99 exceeds the configured SLO"}
+      - alert: OrderFlowNormalErrorsSLO
+        expr: (orderflow:unexpected_error_ratio > on() orderflow_slo_error_ratio{contract="normal"}) and on() (min_over_time(orderflow_campaign_phase{phase="measurement"}[30s]) == 1) and on() (time() - orderflow_campaign_heartbeat_seconds < 15)
+        for: 10s
+        labels: {severity: warning}
+        annotations: {summary: "Normal-phase unexpected errors exceed the configured SLO"}
+      - alert: OrderFlowDegradedErrorsSLO
+        expr: (orderflow:unexpected_error_ratio > on() orderflow_slo_error_ratio{contract="degraded"}) and on() (sum(orderflow_campaign_phase{phase=~"fault|recovery"}) == 1) and on() (time() - orderflow_campaign_heartbeat_seconds < 15)
+        for: 10s
+        labels: {severity: warning, hypothesis: H5}
+        annotations: {summary: "Degraded-phase unexpected errors exceed the configured SLO"}
+      - alert: OrderFlowGeneratorDrops
+        expr: (orderflow:drop_ratio > on() orderflow_slo_drop_ratio{contract="normal"}) and on() (min_over_time(orderflow_campaign_phase{phase="measurement"}[30s]) == 1) and on() (time() - orderflow_campaign_heartbeat_seconds < 15)
+        for: 10s
+        labels: {severity: warning, hypothesis: H2}
+        annotations: {summary: "Generator cannot sustain offered load within the drop budget"}
+      - alert: OrderFlowTelemetryIncomplete
+        expr: (orderflow_telemetry_complete == 0) and on() (orderflow_campaign_active == 1) and on() (time() - orderflow_campaign_heartbeat_seconds < 15)
+        for: 30s
+        labels: {severity: warning}
+        annotations: {summary: "Campaign telemetry is incomplete; do not infer a passing SLO"}
+      - alert: OrderFlowCampaignHeartbeatLost
+        expr: (time() - orderflow_campaign_heartbeat_seconds > 15) and on() (orderflow_campaign_active == 1)
+        for: 10s
+        labels: {severity: warning}
+        annotations: {summary: "Campaign stopped updating its phase/telemetry heartbeat"}
+      - alert: OrderFlowScrapeFailed
+        expr: up{job=~"orderflow-rust|postgres|redis1|redis2|nginx|cadvisor|node|campaign"} == 0
+        for: 30s
+        labels: {severity: warning}
+        annotations: {summary: "An observability scrape target is unavailable"}

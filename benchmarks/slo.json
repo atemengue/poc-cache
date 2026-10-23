@@ -1,0 +1,7 @@
+{
+  "status": "provisional laboratory thresholds; agree before assessment",
+  "normal": {"p95_seconds": 0.1, "p99_seconds": 0.25, "error_ratio": 0.01, "drop_ratio": 0.01},
+  "degraded": {"p95_seconds": 0.5, "p99_seconds": 1.0, "error_ratio": 0.05, "drop_ratio": 0.05},
+  "recovery_seconds": 30,
+  "freshness_seconds": {"db": 0, "aside": 33, "invalidate": 1, "write_through": 1, "protected": 1, "l1l2": 3, "sharded": 1}
+}

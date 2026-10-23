@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""OrderFlow PoC: unified operations and experiments CLI (Python stdlib only)."""
+import argparse
+import os
+from pathlib import Path
+import subprocess
+import sys
+import urllib.request
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / 'scripts'))
+import benchmark_campaign as campaign
+
+def docker(*args, env=None):
+    print('+ docker compose', ' '.join(map(str,args)), flush=True)
+    return subprocess.run(['docker','compose',*map(str,args)],cwd=ROOT,env=env,check=True)
+
+def rust_tests(strict: bool):
+    """Prefer local Cargo; otherwise execute Docker's test build stage."""
+    import shutil
+    if shutil.which('cargo'):
+        subprocess.run(['cargo', 'test', '--locked', '--manifest-path', str(ROOT/'app/Cargo.toml')],
+                       cwd=ROOT, check=True)
+    elif shutil.which('docker'):
+        # Multi-stage Docker build: `FROM build AS test; RUN cargo test --release`.
+        # Separate image tag: do not overwrite Compose's runnable app image.
+        print('+ docker build --target test -t orderflow-cache-rust-tests .', flush=True)
+        subprocess.run(['docker','build','--target','test','-t','orderflow-cache-rust-tests','.'], cwd=ROOT, check=True)
+    elif strict:
+        raise SystemExit('Rust tests require cargo or Docker Engine.')
+    else:
+        print('SKIP Rust tests: neither cargo nor Docker is installed. '
+              'Run ./poc test-rust on a Rust/Docker machine.', file=sys.stderr)
+
+
+def build_parser():
+    p=argparse.ArgumentParser(description=__doc__)
+    sub=p.add_subparsers(dest='command',required=True)
+    up=sub.add_parser('up',help='Build and start all services'); up.add_argument('--replicas',type=int,default=2)
+    down=sub.add_parser('down',help='Stop services'); down.add_argument('--volumes',action='store_true')
+    sub.add_parser('status',help='Show services'); sub.add_parser('check',help='Check API health')
+    sub.add_parser('build',help='Build native Rust app in Docker')
+    sub.add_parser('test-rust',help='Compile and run native Rust unit tests (Cargo or Docker)')
+    logs=sub.add_parser('logs'); logs.add_argument('service',nargs='?',default='app'); logs.add_argument('--follow',action='store_true')
+    mode=sub.add_parser('mode',help='Configure caching and app replicas')
+    mode.add_argument('strategy',choices=['db','aside','invalidate','write_through','protected','l1l2','sharded'])
+    mode.add_argument('--ttl',type=int,default=30); mode.add_argument('--l1-ttl',type=float,default=1)
+    mode.add_argument('--replicas',type=int,default=2); mode.add_argument('--db-delay-ms',type=float,default=0)
+    sub.add_parser('flush',help='Clear both Redis databases')
+    bench=sub.add_parser('benchmark',help='Run one k6 benchmark')
+    bench.add_argument('--rate',type=int,default=100); bench.add_argument('--duration',type=int,default=20)
+    bench.add_argument('--writes',type=float,default=0); bench.add_argument('--hot',type=float,default=.9)
+    bench.add_argument('--keyspace',type=int,default=100); bench.add_argument('--outdir',default='results/manual')
+    bench.add_argument('--mode',default='aside',choices=['db','aside','invalidate','write_through','protected','l1l2','sharded'])
+    run=sub.add_parser('campaign',help='Run the benchmark campaigns (full/smoke/sweep/capacity/resilience)')
+    profile_choices=['smoke','full','sweep','capacity','resilience']
+    for flag,kwargs in [('--profile',dict(choices=profile_choices,default='smoke')),
+                        ('--rate',dict(type=int,default=150)),
+                        ('--duration',dict(type=int,default=25)),
+                        ('--vus',dict(type=int,default=180)),
+                        ('--max-vus',dict(type=int,default=700)),
+                        ('--strategies',dict(nargs='+',choices=campaign.MODES,metavar='MODE')),
+                        ('--rates',dict(nargs='+',type=int,metavar='RPS')),
+                        ('--repetitions',dict(type=int,default=1)),
+                        ('--writes',dict(type=float,default=0.0)),
+                        ('--hot',dict(type=float,default=0.90)),
+                        ('--keyspace',dict(type=int,default=100)),
+                        ('--fault',dict(choices=tuple(campaign.FAULT_ALIASES),metavar='FAULT')),
+                        ('--fault-at',dict(type=int,metavar='SECONDS')),
+                        ('--recover-at',dict(type=int,metavar='SECONDS')),
+                        ('--outdir',dict()),
+                        ('--skip-start',dict(action='store_true')),
+                        ('--no-restore',dict(action='store_true'))]:
+        run.add_argument(flag,**kwargs)
+    run.add_argument('--only',nargs='+')
+    sub.add_parser('test',help='Run CLI/campaign unit tests and Rust unit tests if available')
+    return p
+
+
+def main():
+    p=build_parser()
+    args=p.parse_args()
+    if args.command=='up': docker('up','-d','--build','--scale',f'app={args.replicas}')
+    elif args.command=='down': docker('down',*(['-v'] if args.volumes else []))
+    elif args.command=='build': docker('build','app')
+    elif args.command=='test-rust': rust_tests(strict=True)
+    elif args.command=='status': docker('ps')
+    elif args.command=='check': print(campaign.http_json('/health'))
+    elif args.command=='logs': docker('logs',*(['-f'] if args.follow else ['--tail','100']),args.service)
+    elif args.command=='mode': campaign.configure(args.strategy,args.ttl,args.l1_ttl,args.replicas,args.db_delay_ms)
+    elif args.command=='flush': campaign.flush()
+    elif args.command=='benchmark':
+        out=ROOT / args.outdir
+        if args.outdir == 'results/manual':
+            from datetime import datetime, timezone
+            out = out / datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')
+        if ROOT / 'results' not in out.resolve().parents: p.error('--outdir must be under results/')
+        out.mkdir(parents=True,exist_ok=True)
+        campaign.RESULTS.clear()
+        campaign.run_bench('MANUAL','Single controlled experiment',rate=args.rate,duration=args.duration,strategy=args.mode,writes=args.writes,hot=args.hot,keyspace=args.keyspace,outdir=out)
+    elif args.command=='campaign':
+        argv=['benchmark_campaign.py','--profile',args.profile,'--rate',str(args.rate),'--duration',str(args.duration),'--vus',str(args.vus),'--max-vus',str(args.max_vus)]
+        forwarded = [('--strategies', args.strategies), ('--rates', args.rates),
+                     ('--repetitions', args.repetitions), ('--writes', args.writes),
+                     ('--hot', args.hot), ('--keyspace', args.keyspace),
+                     ('--fault', args.fault), ('--fault-at', args.fault_at),
+                     ('--recover-at', args.recover_at)]
+        for flag, value in forwarded:
+            if value is not None:
+                argv += [flag] + ([str(v) for v in value] if isinstance(value, list) else [str(value)])
+        if args.outdir: argv+=['--outdir',args.outdir]
+        if args.skip_start: argv+=['--skip-start']
+        if args.no_restore: argv+=['--no-restore']
+        if args.only: argv+=['--only',*args.only]
+        subprocess.run([sys.executable,str(ROOT/'scripts/benchmark_campaign.py'),*argv[1:]],cwd=ROOT,check=True)
+    elif args.command=='test':
+        subprocess.run([sys.executable,'-m','unittest','discover','-s','tests','-v'],cwd=ROOT,check=True)
+        rust_tests(strict=False)
+
+if __name__=='__main__': main()

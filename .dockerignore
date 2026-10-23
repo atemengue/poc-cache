@@ -1,0 +1,10 @@
+.git
+.env
+results
+__pycache__
+*.pyc
+app/target
+tests
+infra
+benchmarks
+docs

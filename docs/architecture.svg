@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="270" viewBox="0 0 1100 270" role="img" aria-label="OrderFlow Rust architecture showing shoppers through Nginx, Rust replicas, Redis cache and PostgreSQL">
+  <rect width="1100" height="270" rx="20" fill="#f8fafc"/>
+  <g font-family="DejaVu Sans,Arial,sans-serif" font-size="17" text-anchor="middle">
+    <rect x="20" y="95" width="160" height="75" rx="12" fill="#dbeafe" stroke="#2563eb"/><text x="100" y="125">Fans / k6</text><text x="100" y="148" font-size="14">many repeated reads</text>
+    <rect x="240" y="95" width="140" height="75" rx="12" fill="#e2e8f0" stroke="#64748b"/><text x="310" y="139">Nginx</text>
+    <rect x="440" y="30" width="190" height="70" rx="12" fill="#dcfce7" stroke="#16a34a"/><text x="535" y="61">Rust API replica 1</text><text x="535" y="82" font-size="14">optional L1</text>
+    <rect x="440" y="160" width="190" height="70" rx="12" fill="#dcfce7" stroke="#16a34a"/><text x="535" y="191">Rust API replica N</text><text x="535" y="211" font-size="14">optional L1</text>
+    <rect x="700" y="30" width="165" height="70" rx="12" fill="#fee2e2" stroke="#dc2626"/><text x="782" y="58">Redis L2</text><text x="782" y="81" font-size="14">shared / shards</text>
+    <rect x="910" y="97" width="165" height="75" rx="12" fill="#fef3c7" stroke="#d97706"/><text x="992" y="126">PostgreSQL</text><text x="992" y="150" font-size="14">source of truth</text>
+    <g stroke="#334155" stroke-width="2.5" fill="none" stroke-linecap="round"><path d="M180 132H240"/><path d="M380 132 H405 V65 H440"/><path d="M405 132 V195 H440"/><path d="M630 65 H700"/><path d="M630 195 H670 V65 H700"/><path d="M865 65 H888 V134 H910"/><path d="M630 195 H888 V134"/><path d="M630 65 H670 V134 H910"/></g>
+  </g>
+  <text x="550" y="254" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="13" fill="#475569">Misses / cache failure fall back to PostgreSQL; application replicas share distributed Redis</text>
+</svg>
